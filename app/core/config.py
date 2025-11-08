@@ -44,13 +44,13 @@ class Settings(BaseSettings):
     top_k_results: int = 5
     similarity_threshold: float = 0.7
     temperature: float = 0.7
-    max_tokens: int = 4096  # Increased for longer responses
-    max_context_chars: int = 4000  # Limit context size to prevent token overflow
+    max_tokens: int = 4096
+    max_context_chars: int = 4000
 
     conversation_memory_limit: int = 10
     session_ttl: int = 86400
 
-    # Model config for Pydantic V2
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
