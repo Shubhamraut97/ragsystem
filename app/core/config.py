@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     google_api_key: str
-    gemini_model: str = "gemini-2.5-pro"
+    gemini_model: str = "gemini-2.5-flash"
     gemini_embedding_model: str = "gemini-embedding-001"
 
     # Database

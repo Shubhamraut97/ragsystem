@@ -133,6 +133,7 @@ class ChatQueryResponse(BaseModel):
     sources: list[SourceChunk]
     booking_detected: bool = False
     booking_info: BookingInfo | None = None
+    booking_id: uuid.UUID | None = None  # Booking ID when booking is successfully created
     session_id: uuid.UUID
     timestamp: datetime
 

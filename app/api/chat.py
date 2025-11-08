@@ -4,7 +4,8 @@ import logging
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from google.api_core.exceptions import ResourceExhausted
 from sqlalchemy.orm import Session
 
@@ -89,24 +90,11 @@ async def chat_query(
         # Add user message to memory
         memory_service.add_message(request.session_id, "user", request.query)
 
-        # Perform RAG query
-        rag_result = rag_service.query(
-            db=db,
-            query=request.query,
-            conversation_history=conversation_history,
-            top_k=request.max_results,
-            temperature=request.temperature,
-        )
-
-        response_text = rag_result["response"]
-        sources = rag_result["sources"]
-
-        # Add assistant response to memory
-        memory_service.add_message(request.session_id, "assistant", response_text)
-
-        # Check for booking intent
+        # Check for booking intent first (before RAG to avoid unnecessary processing)
         booking_detected = False
         booking_info = None
+        booking_saved = False
+        booking_id = None
 
         if booking_service.detect_booking_intent(request.query):
             logger.info("Booking intent detected, extracting information...")
@@ -135,8 +123,10 @@ async def chat_query(
                         session_id=request.session_id,
                         booking_info=extracted_booking,
                     )
+                    booking_saved = True
+                    booking_id = saved_booking.id
                     logger.info(
-                        f"Booking saved successfully. ID: {saved_booking.id}, "
+                        f"Booking saved successfully. ID: {booking_id}, "
                         f"Session: {request.session_id}"
                     )
                 except Exception as e:
@@ -146,6 +136,37 @@ async def chat_query(
                 logger.warning(
                     "Booking intent detected but extraction failed or returned no data"
                 )
+
+        # Perform RAG query (only if booking wasn't successfully saved)
+        if not booking_saved:
+            rag_result = rag_service.query(
+                db=db,
+                query=request.query,
+                conversation_history=conversation_history,
+                top_k=request.max_results,
+                temperature=request.temperature,
+            )
+
+            response_text = rag_result["response"]
+            sources = rag_result["sources"]
+        else:
+            # Generate booking confirmation response
+            response_text = (
+                f"Great! I've successfully booked your interview.\n\n"
+                f"**Booking Details:**\n"
+                f"- Booking ID: {booking_id}\n"
+                f"- Name: {booking_info.name}\n"
+                f"- Email: {booking_info.email}\n"
+                f"- Date: {booking_info.date.strftime('%B %d, %Y')}\n"
+                f"- Time: {booking_info.time.strftime('%I:%M %p')}\n\n"
+                f"Your booking is currently pending confirmation. "
+                f"You'll receive a confirmation email at {booking_info.email} shortly.\n\n"
+                f"You can check your booking status using the Booking ID: {booking_id}"
+            )
+            sources = []
+
+        # Add assistant response to memory
+        memory_service.add_message(request.session_id, "assistant", response_text)
 
         # Format sources for response
         source_chunks = [
@@ -164,6 +185,7 @@ async def chat_query(
             sources=source_chunks,
             booking_detected=booking_detected,
             booking_info=booking_info,
+            booking_id=booking_id,
             session_id=request.session_id,
             timestamp=datetime.utcnow(),
         )
@@ -256,15 +278,31 @@ async def delete_session(
 async def list_bookings(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
+    session_id: uuid.UUID | None = Query(None, description="Filter by session ID"),
+    email: str | None = Query(None, description="Filter by email address"),
     db: Session = Depends(get_db),
     booking_service: BookingService = Depends(get_booking_service),
 ):
     """
-    List all bookings with pagination.
+    List bookings with pagination and optional filters.
+
+    You can filter by:
+    - session_id: Get all bookings for a specific session
+    - email: Get all bookings for a specific email address
     """
     try:
-        bookings = booking_service.get_all_bookings(db, skip=skip, limit=limit)
-        total = db.query(Booking).count()
+        # Filter by session_id if provided
+        if session_id:
+            bookings = booking_service.get_bookings_by_session(db, session_id)
+            total = len(bookings)
+        # Filter by email if provided
+        elif email:
+            bookings = db.query(Booking).filter(Booking.email == email).offset(skip).limit(limit).all()
+            total = db.query(Booking).filter(Booking.email == email).count()
+        # Get all bookings
+        else:
+            bookings = booking_service.get_all_bookings(db, skip=skip, limit=limit)
+            total = db.query(Booking).count()
 
         booking_responses = [
             BookingResponse(
@@ -283,13 +321,13 @@ async def list_bookings(
         return BookingListResponse(bookings=booking_responses, total=total)
 
     except Exception as e:
-        logger.error(f"Error listing bookings: {e}")
+        logger.error(f"Error listing bookings: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/bookings/{booking_id}", response_model=BookingResponse)
 async def get_booking(
-    booking_id: uuid.UUID,
+    booking_id: uuid.UUID = Path(..., description="Booking ID (UUID)"),
     db: Session = Depends(get_db),
     booking_service: BookingService = Depends(get_booking_service),
 ):
@@ -315,15 +353,18 @@ async def get_booking(
 
     except HTTPException:
         raise
+    except ValueError as e:
+        logger.error(f"Invalid booking ID format: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid booking ID format: {str(e)}")
     except Exception as e:
-        logger.error(f"Error getting booking: {e}")
+        logger.error(f"Error getting booking: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.patch("/bookings/{booking_id}", response_model=BookingResponse)
 async def update_booking(
-    booking_id: uuid.UUID,
-    request: BookingUpdateRequest,
+    booking_id: uuid.UUID = Path(..., description="Booking ID (UUID)"),
+    request: BookingUpdateRequest = ...,
     db: Session = Depends(get_db),
     booking_service: BookingService = Depends(get_booking_service),
 ):
@@ -331,8 +372,11 @@ async def update_booking(
     Update booking status (pending, confirmed, cancelled).
     """
     try:
+        # Convert enum to string value
+        status_value = request.status.value if hasattr(request.status, 'value') else str(request.status)
+
         booking = booking_service.update_booking_status(
-            db=db, booking_id=booking_id, status=request.status.value
+            db=db, booking_id=booking_id, status=status_value
         )
 
         if not booking:
@@ -351,6 +395,9 @@ async def update_booking(
 
     except HTTPException:
         raise
+    except ValueError as e:
+        logger.error(f"Invalid booking ID or status format: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
     except Exception as e:
-        logger.error(f"Error updating booking: {e}")
+        logger.error(f"Error updating booking: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
