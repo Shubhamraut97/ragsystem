@@ -33,9 +33,9 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up RAG Booking System...")
     try:
         init_db()
-        logger.info("✓ Database initialized")
-        logger.info("✓ Redis connected")
-        logger.info("✓ Qdrant connected")
+        logger.info(" Database initialized")
+        logger.info(" Redis connected")
+        logger.info(" Qdrant connected")
         logger.info("Application startup complete")
     except Exception as e:
         logger.error(f"Error during startup: {e}")
@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+
     logger.info("Shutting down...")
     close_db()
     redis_client.close()
@@ -51,10 +51,10 @@ async def lifespan(app: FastAPI):
     logger.info("Application shutdown complete")
 
 
-# Create FastAPI app
+
 app = FastAPI(
     title=settings.app_name,
-    description="RAG System with Interview Booking using Google Gemini",
+    description="RAG System with Interview Booking ",
     version="1.0.0",
     lifespan=lifespan,
 )
